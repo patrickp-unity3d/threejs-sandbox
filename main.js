@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { toneMapping } from 'three/nodes';
 
 import WebGPU from 'three/addons/capabilities/WebGPU.js';
 import WebGPURenderer from 'three/addons/renderers/webgpu/WebGPURenderer.js';
@@ -13,8 +12,8 @@ import { Sky } from 'three/addons/objects/Sky.js';
 let useOrbitControls = true;
 let useWebGPU = WebGPU.isAvailable();
 
+// renderer
 let renderer;
-
 if (useWebGPU) {
     renderer = new WebGPURenderer();
     renderer.setPixelRatio(window.devicePixelRatio);
@@ -31,9 +30,8 @@ else {
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.2;
 
+// staging
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-const cameraLight = new THREE.DirectionalLight(0xffffff, 5);
 
 let uniforms;
 if (!useWebGPU) {
@@ -48,17 +46,24 @@ if (!useWebGPU) {
     uniforms['mieDirectionalG'].value = 0.7;
 }
 
-scene.add(cameraLight)
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const light = new THREE.DirectionalLight(0xffffff, 5);
+scene.add(light)
 scene.background = new THREE.Color(0x606060);
 
+// glTF
 const loader = new GLTFLoader();
-
 let variants;
 let index = 0;
 let parser;
 let variantsExtension;
 
-loader.load('ContainerModelExported.glb', function (gltf) {
+loader.load('public/ContainerModelExported.glb', loadComplete, undefined, 
+    function() {
+        loader.load('ContainerModelExported.glb', loadComplete, undefined, undefined)
+    });
+
+function loadComplete (gltf) {
     scene.add(gltf.scene);
 
     const box = new THREE.Box3().setFromObject(gltf.scene);
@@ -72,12 +77,9 @@ loader.load('ContainerModelExported.glb', function (gltf) {
 
     if (variants.length > 0)
         selectVariant(scene, parser, variantsExtension, variants[0]);
+}
 
-}, undefined,
-    function (error) {
-        console.error(error);
-    });
-
+// controls
 let controls;
 if (useOrbitControls) {
     controls = new OrbitControls(camera, renderer.domElement);
@@ -90,10 +92,12 @@ else {
     controls.rollSpeed = 0.05;
 }
 
+// variant autoswitch
 window.setInterval(function () {
     selectVariant(scene, parser, variantsExtension, variants[index++ % variants.length]);
 }, 1000);
 
+// frame advance
 if (!useWebGPU)
     animate();
 
@@ -107,9 +111,9 @@ function animate() {
 
     let vec = new THREE.Vector3;
     camera.getWorldDirection(vec);
-    cameraLight.position.x = -vec.x;
-    cameraLight.position.y = -vec.y;
-    cameraLight.position.z = -vec.z;
+    light.position.x = -vec.x;
+    light.position.y = -vec.y;
+    light.position.z = -vec.z;
 
     if (!useWebGPU) {
         const phi = THREE.MathUtils.degToRad(90 - (new Date().getTime() / 1000) % 180);
@@ -122,6 +126,7 @@ function animate() {
     renderer.render(scene, camera);
 }
 
+// utilities
 function selectVariant(scene, parser, extension, variantName) {
     const variantIndex = extension.variants.findIndex((v) => v.name.includes(variantName));
     scene.traverse(
