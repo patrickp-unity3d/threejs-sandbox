@@ -6,8 +6,16 @@ import WebGPURenderer from 'three/addons/renderers/webgpu/WebGPURenderer.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from 'three/addons/controls/FlyControls.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js'
+import { GroundProjectedSkybox } from "three/addons/objects/GroundProjectedSkybox.js";
 
-import { Sky } from 'three/addons/objects/Sky.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { TAARenderPass } from 'three/addons/postprocessing/TAARenderPass.js';
+import { CopyShader } from 'three/addons/shaders/CopyShader.js';
+
+const param = { TAAEnabled: '1', TAASampleLevel: 5 };
 
 let useOrbitControls = true;
 let useWebGPU = WebGPU.isAvailable();
@@ -23,61 +31,52 @@ if (useWebGPU) {
     document.body.appendChild(renderer.domElement);
 }
 else {
-    renderer = new THREE.WebGLRenderer();
+    renderer = new THREE.WebGLRenderer({
+        powerPreference: "high-performance",
+        antialias: false,
+        stencil: false,
+        depth: false
+    });
+    renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.outputEncoding = THREE.sRGBEncoding;
     document.body.appendChild(renderer.domElement);
 }
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.2;
+renderer.toneMappingExposure = 3;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(23, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+// taa
+let composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, {type: THREE.HalfFloatType}));
+
+let taaRenderPass = new TAARenderPass(scene, camera);
+taaRenderPass.unbiased = false;
+composer.addPass(taaRenderPass);
+
+let renderPass = new RenderPass(scene, camera);
+renderPass.enabled = false;
+composer.addPass(renderPass);
+
+let copyPass = new ShaderPass(CopyShader);
+composer.addPass(copyPass);
+
+window.addEventListener('resize', () => {
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+
+    renderer.setSize(width, height);
+    composer.setSize(width, height);
+});
 
 // staging
-const scene = new THREE.Scene();
-
-let uniforms;
-if (!useWebGPU) {
-    let sky = new Sky();
-    sky.scale.setScalar(450000);
-    scene.add(sky);
-
-    uniforms = sky.material.uniforms;
-    uniforms['turbidity'].value = 10;
-    uniforms['rayleigh'].value = 3;
-    uniforms['mieCoefficient'].value = 0.005;
-    uniforms['mieDirectionalG'].value = 0.7;
-}
-
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-const light = new THREE.DirectionalLight(0xffffff, 5);
+const light = new THREE.DirectionalLight(0xffffff, 0.5);
 scene.add(light)
 scene.background = new THREE.Color(0x606060);
-
-// glTF
-const loader = new GLTFLoader();
-let variants;
-let index = 0;
-let parser;
-let variantsExtension;
-
-loader.load('public/ContainerModelExported.glb', loadComplete, undefined, 
-    function() {
-        loader.load('ContainerModelExported.glb', loadComplete, undefined, undefined)
-    });
-
-function loadComplete (gltf) {
-    scene.add(gltf.scene);
-
-    const box = new THREE.Box3().setFromObject(gltf.scene);
-    const center = box.getCenter(new THREE.Vector3());
-
-    gltf.scene.position.set(-center.x, -center.y, -center.z);
-
-    parser = gltf.parser;
-    variantsExtension = gltf.userData.gltfExtensions['KHR_materials_variants'];
-    variants = variantsExtension.variants.map((variant) => variant.name);
-
-    if (variants.length > 0)
-        selectVariant(scene, parser, variantsExtension, variants[0]);
-}
 
 // controls
 let controls;
@@ -92,17 +91,93 @@ else {
     controls.rollSpeed = 0.05;
 }
 
-// variant autoswitch
-window.setInterval(function () {
-    selectVariant(scene, parser, variantsExtension, variants[index++ % variants.length]);
-}, 1000);
-
 // frame advance
 if (!useWebGPU)
     animate();
 
+new RGBELoader().setPath('assets/').loadAsync('construction_2k.hdr').then(texture => {
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+    texture.anisotropy = 1;
+    texture.generateMipmaps = false;
+    texture.encoding = THREE.LinearEncoding;
+    scene.background = texture;
+    scene.environment = texture;
+
+    render();
+
+    // higher res - 8K is the width, unlike in Product Experience where Fred used 8K for height - effectively this 8K is 1/2 the size of Product Experience
+    new RGBELoader().setPath('assets/').loadAsync('construction_8k.hdr', progress => {
+        console.log(progress);
+        render();
+    }).then(texture => {
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+        texture.anisotropy = 1;
+        texture.generateMipmaps = false;
+        texture.encoding = THREE.LinearEncoding;
+        scene.background = texture;
+
+        const env = new GroundProjectedSkybox(texture);
+        env.scale.setScalar(100);
+        env.height = 5;
+        scene.add(env);
+
+        render();
+    });
+});
+
+// glTF
+const loader = new GLTFLoader();
+let variants = { length: 0 };
+let variantIndex = 0;
+let parser;
+let variantsExtension;
+
+loader.loadAsync('assets/construction.glb').then(gltf => {
+    scene.add(gltf.scene);
+    gltf.scene.getObjectByName('CircularFloor').visible = false;
+});
+
+loader.loadAsync('assets/skidLoader.glb').then(gltf => {
+    scene.add(gltf.scene);
+
+    gltf.scene.traverse(function (child) {
+        console.log(child.name);
+        if (child.name == 'Wheels_Assembly-1' || child.name == 'Brush_Cutter_Assembly-1' || child.name == 'Sweeper_Assembly-1' || child.name == 'Bucket_Assembly-1') {
+            child.traverse(function (subchild) {
+                subchild.visible = false;
+            });
+        }
+        if (child.type == THREE.SpotLight)
+            child.visible = false;
+        if (child.type == THREE.DirectionalLight)
+            child.visible = false;
+        if (child.type == THREE.Light)
+            child.visible = false;
+    });
+
+    parser = gltf.parser;
+    variantsExtension = gltf.userData.gltfExtensions['KHR_materials_variants'];
+    if (variantsExtension != undefined)
+        variants = variantsExtension.variants.map((variant) => variant.name);
+
+    if (variants.length > 0)
+        selectVariant(scene, parser, variantsExtension, variants[0]);
+});
+
+// variant autoswitch
+window.setInterval(function () {
+    if (variants.length > 0)
+        selectVariant(scene, parser, variantsExtension, variants[variantIndex++ % variants.length]);
+}, 2000);
+
 function animate() {
     requestAnimationFrame(animate);
+
+    render();
+}
+
+function render() {
+    //index++;
 
     if (useOrbitControls)
         controls.update();
@@ -115,15 +190,19 @@ function animate() {
     light.position.y = -vec.y;
     light.position.z = -vec.z;
 
-    if (!useWebGPU) {
-        const phi = THREE.MathUtils.degToRad(90 - (new Date().getTime() / 1000) % 180);
-        const theta = THREE.MathUtils.degToRad(180);
-        let sun = new THREE.Vector3();
-        sun.setFromSphericalCoords(1, phi, theta);
-        uniforms['sunPosition'].value.copy(sun);
+    if (taaRenderPass) {
+        taaRenderPass.enabled = (param.TAAEnabled === '1');
+        renderPass.enabled = (param.TAAEnabled !== '1');
     }
+    if (taaRenderPass) {
+        taaRenderPass.sampleLevel = param.TAASampleLevel;
+    }
+    taaRenderPass.accumulate = false;
 
+    composer.render();
+    /*
     renderer.render(scene, camera);
+    */
 }
 
 // utilities
